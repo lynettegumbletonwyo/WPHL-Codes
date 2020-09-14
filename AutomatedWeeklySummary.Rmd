@@ -1,0 +1,604 @@
+---
+title: "**Weekly Report `r format(Sys.time(), '%Y/%m/%d')`**"
+author: "Prepared: `r format(Sys.time(), '%x')`"
+output: html_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, results='hide', message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+root.dir='dirname(rstudioapi::getActiveDocumentContext()$path)'
+
+# Install packages --------------------------------------------------------
+library(agricolae)
+library(Rmisc)
+library(gdata)
+library(rlist)
+library(stringr)
+library(ggplot2)
+library(grid)
+library(fBasics)
+library(reshape2)
+library(gdata)
+library(stringr)
+library(readxl)
+library(knitr)
+library(devtools)
+library(fuzzyjoin)
+library(rmarkdown)
+library(kableExtra)
+library(readxl)
+library(here)
+library(naniar)
+library(lubridate)
+library(rstudioapi)
+library(data.table)
+library(readr)
+library(textclean)
+library(janitor)
+library(tidyverse)
+library(dplyr)
+library(zoo)
+library(kableExtra)
+library(magick)
+library(xtable)
+library(utils)
+library(latexpdf)
+library(padr)
+library(excelR)
+```
+
+```{r, include=FALSE, echo=FALSE, results='hide', message=FALSE}
+root.dir='dirname(rstudioapi::getActiveDocumentContext()$path)'
+
+# Load wLIMS ---------------------------------------------------------------
+wLIMS <- 
+  read_csv("Data/wLIMS.csv", 
+           col_types = cols(.default = "c")) %>% 
+  filter(!is.na(date_received)) %>%
+  filter(!(last_name == "wastewater" & first_name == "wastewater" & is.na(birth_date))) %>% 
+  filter(!(last_name %in% c("pt","verification") & birth_date == "2001-01-01")) %>% 
+  mutate_at(vars(date_collected, birth_date, date_approved, date_received), 
+            ~as.Date(.)) %>% 
+  mutate(turnaround_time = as.double(turnaround_time)) 
+
+# Load Master -------------------------------------------------------------
+tmaster <- read_csv("Data/tmaster.csv", 
+                    col_types = cols(.default = "c")) %>% 
+  filter(!(last_name == "WASTEWATER" & first_name == "WASTEWATER" & is.na(birth_date))) %>% 
+  filter(!(last_name %in% c("PT","VERIFICATION") & birth_date == "2001-01-01")) %>% 
+  mutate_at(vars(date_collected, birth_date, date_received), 
+            ~as.Date(.))
+
+# Weekly ---------------------------------------------------------------
+receivedLIMS <- wLIMS %>% 
+  filter(between(date_received, as_date(today()-days(8)),as_date(today()-days(1))))
+
+#Weekly counts
+weekly_received <- receivedLIMS %>% 
+  count(date_received) %>% 
+  mutate(test_result_cov = "RECEIVED")
+weekly_results <- receivedLIMS %>% 
+  filter(!(is.na(last_name) & is.na(first_name) & is.na(birth_date))) %>% 
+  count(date_received, test_result_cov) %>%  
+  replace(is.na(.),"UNTESTED") 
+weekly_rerun <- receivedLIMS %>% 
+  count(date_received, run_2) %>% 
+  filter(!is.na(run_2)) %>% 
+  count(date_received, n) %>% 
+  mutate(n = str_replace(n, "1", "RERUN")) %>% 
+  replace_na(list(n = "RERUN")) %>% 
+  rename(test_result_cov = n) %>% 
+  rename(n = nn)
+weekly_pending <- receivedLIMS %>% 
+  select(date_received, turnaround_time) %>% 
+  mutate(turnaround_time = case_when(
+    turnaround_time > "0" ~ "PENDING")) %>% 
+  count(date_received, turnaround_time) %>% 
+  filter(!is.na(turnaround_time)) %>% 
+  rename(test_result_cov = turnaround_time) 
+  
+weekly_summary <- 
+  bind_rows(weekly_results, weekly_rerun, weekly_received, weekly_pending) %>% 
+  mutate_if(is.character, ~toupper(.)) %>% 
+  pad(interval = "day", start_val = today()-days(8),end_val = today()-days(1), group = "test_result_cov") %>% 
+  replace_na(list(n = 0)) %>% 
+  pivot_wider(id_cols = `date_received`,
+              names_from = `test_result_cov`,
+              values_from = `n`) %>% 
+  select(date_received, RECEIVED, `SAMPLE NOT TESTED`, `SARS-COV2 POSITIVE`, `SARS-COV2 NEGATIVE`, RERUN, PENDING, everything()) %>% 
+  rename("DATE RECEIVED" = date_received) 
+write.csv(weekly_summary, file = "Data/Weekly Summary/weekly_summary.csv", row.names = F)
+
+weekly_received <- receivedLIMS %>% 
+  count(date_received)
+write.csv(weekly_received, file = "Data/Weekly Summary/weekly_received.csv", row.names = F)
+
+weekly_released <- receivedLIMS %>% 
+  count(date_approved, date_received)
+write.csv(weekly_released, file = "Data/Weekly Summary/weekly_released.csv", row.names = F)
+
+weekly_test_used <- receivedLIMS %>% 
+  filter(test_result_cov != "sample not tested") %>% 
+  count(date_approved, test_name)
+write.csv(weekly_test_used, file = "Data/Weekly Summary/test_used.csv", row.names = F)
+
+weekly_testresults <- count(receivedLIMS, date_received, test_result_cov) %>%  
+  replace(is.na(.),"UNRUN") %>% 
+  pad(interval = "day",end_val = today(), group = "test_result_cov") %>% 
+  replace_na(list(n = 0)) %>% 
+  arrange(desc(test_result_cov))
+write.csv(weekly_testresults, file = "Data/Weekly Summary/weekly_testresults.csv", row.names = F)
+
+weekly_newpositive <- tmaster %>% 
+  filter(test_result_cov == "SARS-COV2 POSITIVE") %>% 
+  arrange(covid_id, date_collected) %>% 
+  distinct(covid_id, .keep_all = T) %>% 
+  filter(between(date_received, as_date(today()-days(7)),as_date(today()-days(1)))) %>%      
+  count(date_received, test_result_cov)
+write.csv(weekly_newpositive, file = "Data/Weekly Summary/weekly_newpositive.csv", row.names = F)
+
+weekly_counties <-  tmaster %>% 
+  filter(between(date_received, as_date(today()-days(7)),as_date(today()-days(1)))) %>%     
+  filter(test_result_cov == "SARS-COV2 POSITIVE") %>% 
+  count(county) %>% 
+  rename("COUNTY" = county, "POSITIVE TESTS IN PAST WEEK" = n)
+write.csv(weekly_counties, file = "Data/Weekly Summary/weekly_counties.csv", row.names = F)
+
+weekly_counties_new <-  tmaster %>% 
+  filter(test_result_cov == "SARS-COV2 POSITIVE") %>% 
+  arrange(covid_id, date_collected) %>% 
+  distinct(covid_id, .keep_all = T) %>% 
+  filter(between(date_received, as_date(today()-days(7)),as_date(today()-days(1)))) %>%      
+  count(county) %>% 
+  rename("COUNTY" = county, "NEW POSITIVE PATIENTS IN PAST WEEK" = n)
+write.csv(weekly_counties_new, file = "Data/Weekly Summary/weekly_counties_new.csv", row.names = F)
+
+
+#Weekly list of results
+list_positive <- receivedLIMS %>% 
+  filter(test_result_cov == "SARS-COV2 POSITIVE")
+
+list_newpositive <- tmaster %>% 
+  filter(test_result_cov == "SARS-COV2 POSITIVE") %>% 
+  arrange(covid_id, date_collected) %>% 
+  distinct(covid_id, .keep_all = T) %>% 
+  filter(between(date_received, as_date(today()-days(7)),as_date(today()-days(1))))   
+
+list_inconclusive <- receivedLIMS %>% 
+  filter(test_result_cov == "SARS-COV2 INCONCLUSIVE")
+
+list_invalid <- receivedLIMS %>% 
+  filter(test_result_cov == "INVALID SAMPLE")
+
+list_rejected <- receivedLIMS %>% 
+  filter(test_result_cov == "SAMPLE NOT TESTED")
+
+list_rerun <- receivedLIMS %>% 
+  filter(!is.na(`run_2`)|!is.na(`run_3`)|!is.na(`run_4`)|!is.na(`run_5`)|!is.na(`run_6`))
+
+# Cumulative --------------------------------------------------------------
+cumulative_released <- wLIMS %>% 
+  filter(!is.na(date_received)) %>%
+  count(`status`) %>%  
+  replace(is.na(.),"unrun")
+
+cumulative_testresults <- wLIMS %>% 
+  filter(!is.na(date_received)) %>%
+  count(`test_result_cov`)%>%  
+  replace(is.na(.),"UNRUN") %>% 
+  slice(5,3,1,2,4,6)
+
+cumulative_turnaround <- wLIMS %>% 
+  filter(!is.na(turnaround_time)) %>% 
+  count(turnaround_time) %>% 
+  mutate(percent = round(n/sum(n)*100,1))
+
+# Graphs ------------------------------------------------------------------
+z1 <- wLIMS %>% 
+  filter(!is.na(date_received)) %>%
+  count(date_received) %>% 
+  mutate(sevendayavg = rollmean(n, 7, fill = 0, align = "right")) %>% 
+  mutate(cum_total = cumsum(n))
+z1.1 <- z1 %>% 
+  filter(between(date_received, as_date(today()-days(8)),as_date(today())))
+
+z2 <- wLIMS %>% 
+  filter(!is.na(date_received)) %>%
+  count(date_received, date_approved) %>% 
+  mutate(turnaround = as.duration(date_received %--% date_approved)/ddays(1)) %>% 
+  mutate(date_diff = case_when(
+    turnaround >= 3 ~ "3+",
+    turnaround == 2 ~ "2",
+    turnaround == 1 ~ "1",
+    turnaround == 0 ~ "0",
+    is.na(turnaround) ~ "Unreleased"))
+z2.1 <- z2 %>% 
+  filter((date_received >= as_date(today()-days(8))))
+
+z3 <- wLIMS %>% 
+  filter(!is.na(date_received)) %>%
+
+  count(date_received, test_result_cov) %>% 
+  pad(interval = "day", start_val = as.POSIXct('2020-03-04', tz = 'MST'),end_val = today(), group = "test_result_cov") %>% 
+  replace_na(list(n = 0)) %>% 
+  group_by(test_result_cov) %>% 
+  mutate(sevendayavg = case_when(
+    test_result_cov == "sars-cov2 inconclusive" ~ rollmean(n, 7, fill = 0, align = "right"),
+    test_result_cov == "invalid sample" ~ rollmean(n, 7, fill = 0, align = "right"),
+    test_result_cov == "sars-cov2 negative" ~ rollmean(n, 7, fill = 0, align = "right"),
+    test_result_cov == "sample not tested" ~ rollmean(n, 7, fill = 0, align = "right"),
+    test_result_cov == "sars-cov2 positive" ~ rollmean(n, 7, fill = 0, align = "right"))) %>% 
+  mutate(cum_result = case_when(
+    test_result_cov == "sars-cov2 inconclusive" ~ cumsum(n),
+    test_result_cov == "invalid sample" ~ cumsum(n),
+    test_result_cov == "sars-cov2 negative" ~ cumsum(n),
+    test_result_cov == "sample not tested" ~ cumsum(n),
+    test_result_cov == "sars-cov2 positive" ~ cumsum(n))) %>% 
+  arrange(desc(test_result_cov))
+z3.1 <- z3 %>% 
+  filter((date_received >= as_date(today()-days(8))))
+
+z4 <- tmaster %>% 
+  filter(test_result_cov == "SARS-COV2 POSITIVE") %>% 
+  count(date_received, county)%>% 
+  filter(date_received < today())
+z4 <- z4 %>% 
+  mutate(date_received = as_date(date_received)) %>% 
+  pad(interval = "day", start_val = as.POSIXct('2020-03-04', tz = 'MST'), end_val = today(), group = "county") %>% 
+  replace_na(list(n = 0)) %>% 
+  group_by(county) %>% 
+  mutate(cum_county = cumsum(n))
+z4.1 <- z4 %>% 
+  filter((date_received >= as_date(today()-days(8))))
+
+level_order <- factor(z3$test_result_cov, levels = c("sars-cov2 positive", "sars-cov2 inconclusive", "invalid sample", "sample not tested", NA, "sars-cov2 negative"))
+level_order1 <- factor(z3.1$test_result_cov, levels = c("sars-cov2 positive", "sars-cov2 inconclusive", "invalid sample", "sample not tested", NA, "sars-cov2 negative"))
+
+#Make Graphs
+graph_rollmean <- ggplot(z1, aes(x=date_received, y=c(n, sevendayavg))) + 
+  geom_col(aes(x=date_received, y=n)) +
+  geom_line(aes(y=sevendayavg)) +  
+  labs(x = "Date", y = "Samples Received") + 
+  theme_bw()
+graph_rollmean
+ggsave("Data/Weekly Summary/graph_rollmean.png", plot = graph_rollmean, width = 17, height = 10, units = "cm")
+
+
+graph_turnaround <- ggplot(z2, aes(x=date_received, y=n)) + 
+  geom_col(aes(x=date_received, y=n, fill = date_diff),position = position_stack(reverse = T)) + 
+  labs(x = "Date", y = "Samples Received") + 
+  theme_bw() 
+graph_turnaround
+ggsave("Data/Weekly Summary/graph_turnaround.png", plot = graph_turnaround, width = 17, height = 10, units = "cm")
+
+graph_positive <- ggplot(subset(z3, test_result_cov == "sars-cov2 positive")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Positive Sample Count", title = "SARS-COV2 Positive Samples by Date Received") +
+  theme_bw() 
+graph_positive
+ggsave("Data/Weekly Summary/graph_positive.png", plot = graph_positive, width = 17, height = 10, units = "cm")
+
+graph_negative <- ggplot(subset(z3, test_result_cov == "sars-cov2 negative")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Negative Sample Count", title = "SARS-COV2 Negative Samples by Date Received") +
+  theme_bw() 
+graph_negative
+ggsave("Data/Weekly Summary/graph_negative.png", plot = graph_negative,  width = 17, height = 10,  units = "cm")
+
+graph_inconclusive <- ggplot(subset(z3, test_result_cov == "sars-cov2 inconclusive")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Inconclusive Sample Count", title = "SARS-COV2 Inconclusive Samples by Date Received") +
+  theme_bw() 
+graph_inconclusive
+ggsave("Data/Weekly Summary/graph_inconclusive.png", plot = graph_inconclusive, width = 17, height = 10,  units = "cm")
+
+graph_not_tested <- ggplot(subset(z3, test_result_cov == "sample not tested")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Not Tested Sample Count", title = "Samples Not Tested by Date Received") +
+  theme_bw() 
+graph_not_tested
+ggsave("Data/Weekly Summary/graph_not_tested.png", plot = graph_not_tested, width = 17, height = 10,  units = "cm")
+
+graph_invalid <- ggplot(subset(z3, test_result_cov == "invalid sample")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "Invalid Sample Count", title = "Invalid Samples by Date Received") +
+  theme_bw() 
+graph_invalid
+ggsave("Data/Weekly Summary/graph_invalid.png", plot = graph_invalid, width = 17, height = 10, units = "cm")
+
+graph_results <- ggplot(z3) + 
+  geom_col(aes(x=date_received, y=n, fill = level_order), position = position_stack(reverse = T)) + 
+  geom_line(aes(x=date_received, y=sevendayavg, color = level_order)) + 
+  labs(x = "Date", y = "Sample Result") + 
+  theme_bw() 
+graph_results
+ggsave("Data/Weekly Summary/graph_results.png", plot = graph_results, width = 17, height = 10, units = "cm")
+
+graph_cum <- ggplot(z3, aes(x=date_received, y= c(n, cum_result))) + 
+  geom_col(aes(x=date_received, y=cum_result, fill = level_order), position = position_stack(reverse = T)) + 
+  labs(x = "Date", y = "Sample Result") + 
+  theme_bw() 
+graph_cum
+ggsave("Data/Weekly Summary/graph_cum.png", plot = graph_cum, width = 17, height = 10, units = "cm")
+
+graph_counties <- ggplot(z4, aes(x=date_received, y= c(n, county))) + 
+  geom_col(aes(y=n, color = county)) + 
+  facet_wrap(vars(county)) + 
+  guides(colour=FALSE) +
+  theme_bw() 
+graph_counties
+ggsave("Data/Weekly Summary/graph_counties.png", plot = graph_counties, width = 17, height = 10, units = "cm")
+
+#Week graphs
+wk_graph_rollmean <- ggplot(z1.1, aes(x=date_received, y=c(n, sevendayavg))) + 
+  geom_col(aes(x=date_received, y=n)) +
+  geom_line(aes(y=sevendayavg)) +  
+  labs(x = "Date", y = "Samples Received") + 
+  theme_bw()
+wk_graph_rollmean
+ggsave("Data/Weekly Summary/wk_graph_rollmean.png", plot = wk_graph_rollmean, width = 17, height = 10, units = "cm")
+
+wk_graph_turnaround <- ggplot(z2.1, aes(x=date_received, y=n)) + 
+  geom_col(aes(x=date_received, y=n, fill = date_diff),position = position_stack(reverse = T)) + 
+  labs(x = "Date", y = "Samples Received") + 
+  theme_bw() 
+wk_graph_turnaround
+ggsave("Data/Weekly Summary/wk_graph_turnaround.png", plot = wk_graph_turnaround, width = 17, height = 10, units = "cm")
+
+wk_graph_positive <- ggplot(subset(z3.1, test_result_cov == "sars-cov2 positive")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Positive Sample Count", title = "SARS-COV2 Positive Samples by Date Received") +
+  theme_bw() 
+wk_graph_positive
+ggsave("Data/Weekly Summary/wk_graph_positive.png", plot = wk_graph_positive, width = 17, height = 10, units = "cm")
+
+wk_graph_negative <- ggplot(subset(z3.1, test_result_cov == "sars-cov2 negative")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Negative Sample Count", title = "SARS-COV2 Negative Samples by Date Received") +
+  theme_bw() 
+wk_graph_negative
+ggsave("Data/Weekly Summary/wk_graph_negative.png", plot = wk_graph_negative,  width = 17, height = 10,  units = "cm")
+
+wk_graph_inconclusive <- ggplot(subset(z3.1, test_result_cov == "sars-cov2 inconclusive")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Inconclusive Sample Count", title = "SARS-COV2 Inconclusive Samples by Date Received") +
+  theme_bw() 
+wk_graph_inconclusive
+ggsave("Data/Weekly Summary/wk_graph_inconclusive.png", plot = wk_graph_inconclusive, width = 17, height = 10,  units = "cm")
+
+wk_graph_not_tested <- ggplot(subset(z3.1, test_result_cov == "sample not tested")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "SARS-COV2 Not Tested Sample Count", title = "Samples Not Tested by Date Received") +
+  theme_bw() 
+wk_graph_not_tested
+ggsave("Data/Weekly Summary/wk_graph_not_tested.png", plot = wk_graph_not_tested, width = 17, height = 10,  units = "cm")
+
+wk_graph_invalid <- ggplot(subset(z3.1, test_result_cov == "invalid sample")) + 
+  geom_col(aes(x=date_received, y=n)) + 
+  geom_line(aes(x=date_received, y=sevendayavg)) +
+  labs(x = "Date Received", y = "Invalid Sample Count", title = "Invalid Samples by Date Received") +
+  theme_bw() 
+wk_graph_invalid
+ggsave("Data/Weekly Summary/wk_graph_invalid.png", plot = wk_graph_invalid, width = 17, height = 10, units = "cm")
+
+wk_graph_results <- ggplot(z3.1, aes(x=date_received, y= c(n, sevendayavg))) + 
+  geom_col(aes(x=date_received, y=n, fill = level_order1), position = position_stack(reverse = T)) +
+  labs(x = "Date", y = "Sample Result") + 
+  theme_bw() 
+wk_graph_results
+ggsave("Data/Weekly Summary/wk_graph_results.png", plot = wk_graph_results, width = 17, height = 10, units = "cm")
+
+wk_graph_cum <- ggplot(z3.1, aes(x=date_received, y= c(n, cum_result))) + 
+  geom_col(aes(x=date_received, y=cum_result, fill = level_order1), position = position_stack(reverse = T)) + 
+  labs(x = "Date", y = "Sample Result") + 
+  theme_bw() 
+wk_graph_cum
+ggsave("Data/Weekly Summary/wk_graph_cum.png", plot = wk_graph_cum, width = 17, height = 10, units = "cm")
+
+wk_graph_counties <- ggplot(z4.1, aes(x=date_received, y= c(n, county))) + 
+  geom_col(aes(y=n, color = county)) + facet_wrap(vars(county)) +
+  guides(colour=FALSE) +
+  theme_bw() 
+wk_graph_counties
+ggsave("Data/Weekly Summary/wk_graph_counties.png", plot = wk_graph_counties, width = 17, height = 10, units = "cm")
+
+```
+
+![](Data\\Automating Reports\\Spec Tracking\\Archive\\WPHL Logo.png)
+
+## WPHL Weekly Summary {.tabset}
+
+### Cumulative Data for WPHL
+
+<style>
+.column-left{
+  float: left;
+  width: 40%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 40%;
+  text-align: right;
+}
+</style>
+
+<div class="column-left">
+<div style="margin-bottom:50px;">
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE}
+knitr::kable(cumulative_testresults, col.names = c("Specimen Status", "Number of Samples"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+</div>
+</div>
+<div class="column-right">
+<div style="margin-bottom:50px;">
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE}
+knitr::kable(cumulative_testresults, col.names = c("Test Result", "Number of Samples"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+</div>   
+</div>
+
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE}
+knitr::kable(cumulative_turnaround, col.names = c("Turnaround Time in Days", "Number of Samples", "Percent"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+
+
+### Weekly Summary
+
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE}
+knitr::kable(weekly_summary, col.names = c("Date Received", "Samples Received", "Samples Not Tested", "SARS-COV2 Positive", "SARS-COV2 Negative", "Rerun", "Pending", "Invalid Sample", "Inconclusive"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+
+
+### Manual Counts from Run Worksheets
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE}
+root.dir='dirname(rstudioapi::getActiveDocumentContext()$path)'
+
+knitr::kable(read_excel("Data/Weekly Summary/manual_counts_multiplex.xlsx"), caption = "Flu Multiplex Assay", digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  kable_material(c("striped", "hover"))
+
+knitr::kable(read_excel("Data/Weekly Summary/manual_counts_RTPCR.xlsx"), caption = "CDC rRT-PCR Test", digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  kable_material(c("hover", "striped"))
+
+knitr::kable(read_excel("Data/Weekly Summary/manual_counts_XPERT.xlsx"), caption = "Xpert Xpress Test", digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  kable_material(c("striped", "hover"))
+
+```
+
+### Graphs - Cumulative Data
+
+**Samples Received (Line is 7-day rolling average)**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+graph_rollmean
+```
+
+**Turnaround Time**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+graph_turnaround
+```
+
+**Daily Results with Line Indicating 7-day Average**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+graph_results
+```
+
+**Cumulative Results**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+graph_cum
+```
+
+**Positive Tests by County**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+graph_counties
+```
+
+
+
+
+### Weekly Data for WPHL
+
+<style>
+.column-left{
+  float: left;
+  width: 40%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 40%;
+  text-align: right;
+}
+</style>
+
+<div class="column-left">
+<div style="margin-bottom:155px;">
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+knitr::kable(weekly_received, col.names = c("Date Received", "Count"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+</div>
+</div>
+<div class="column-right">
+<div style="margin-bottom:50px;">
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+knitr::kable(weekly_test_used, col.names = c("Date Released", "Test", "Count"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+</div>   
+</div>
+
+<style>
+.column-left{
+  float: left;
+  width: 40%;
+  text-align: left;
+}
+.column-right{
+  float: right;
+  width: 40%;
+  text-align: right;
+}
+</style>
+
+<div class="column-left">
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+knitr::kable(weekly_counties, col.names = c("County", "Positive Tests"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+</div>
+<div class="column-right">
+```{r, echo=FALSE, message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+knitr::kable(weekly_released, col.names = c("Date Released", "Date Sample Received", "Count"), digits = 3, format.args = list(big.mark = ",", scientific = FALSE)) %>%
+  
+  kable_material(c("striped", "hover"))
+```
+</div>
+
+
+### Graphs - Weekly Data
+
+**Samples Received (Line is 7-day rolling average)**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+wk_graph_rollmean
+```
+
+**Turnaround Time**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+wk_graph_turnaround
+```
+
+**Daily Results**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+wk_graph_results
+```
+
+**Cumulative Results**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+wk_graph_cum
+```
+
+**Positive Tests by County**  
+```{r, echo=FALSE, results='hide', message=FALSE, error=FALSE, warning= FALSE, message= FALSE}
+wk_graph_counties
+```
